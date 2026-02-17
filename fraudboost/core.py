@@ -12,6 +12,7 @@ import warnings
 
 from .losses import BaseLoss, ValueWeightedLogLoss, LogLoss, FocalLoss
 from .tree import ValueWeightedDecisionTree
+from ._rust_core import has_rust_backend, RustBooster
 
 
 class FraudBoostClassifier:
@@ -40,7 +41,8 @@ class FraudBoostClassifier:
                  early_stopping_rounds: Optional[int] = 10,
                  validation_fraction: float = 0.1,
                  random_state: Optional[int] = None,
-                 verbose: int = 0):
+                 verbose: int = 0,
+                 backend: str = 'auto'):
         """
         Args:
             n_estimators: Number of boosting rounds
@@ -58,6 +60,7 @@ class FraudBoostClassifier:
             validation_fraction: Fraction of training data for early stopping
             random_state: Random seed for reproducibility
             verbose: Verbosity level (0=silent, 1=progress, 2=detailed)
+            backend: Backend to use ('auto', 'rust', 'python'). 'auto' uses Rust if available
         """
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -74,6 +77,7 @@ class FraudBoostClassifier:
         self.validation_fraction = validation_fraction
         self.random_state = random_state
         self.verbose = verbose
+        self.backend = backend
         
         # Fitted attributes
         self.estimators_: List[ValueWeightedDecisionTree] = []
@@ -90,6 +94,9 @@ class FraudBoostClassifier:
         
         # Setup loss function
         self.loss_fn_ = self._setup_loss_function(loss)
+        
+        # Choose backend
+        self._use_rust = self._choose_backend(backend)
     
     def _setup_loss_function(self, loss: Union[str, BaseLoss]) -> BaseLoss:
         """Setup the loss function."""
@@ -103,6 +110,19 @@ class FraudBoostClassifier:
             return LogLoss()
         else:
             raise ValueError(f"Unknown loss function: {loss}")
+    
+    def _choose_backend(self, backend: str) -> bool:
+        """Choose between Rust and Python backends."""
+        if backend == 'rust':
+            if not has_rust_backend():
+                raise ValueError("Rust backend not available. Build with maturin develop --release -m rust_core/Cargo.toml")
+            return True
+        elif backend == 'python':
+            return False
+        elif backend == 'auto':
+            return has_rust_backend()
+        else:
+            raise ValueError(f"Unknown backend: {backend}. Choose from 'auto', 'rust', 'python'")
     
     def fit(self, X: np.ndarray, y: np.ndarray, 
             amounts: Optional[np.ndarray] = None,
@@ -126,6 +146,65 @@ class FraudBoostClassifier:
         
         if amounts is None:
             amounts = np.ones(n_samples)
+        
+        # Choose implementation
+        if self._use_rust:
+            return self._fit_rust(X, y, amounts, X_val, y_val, amounts_val)
+        else:
+            return self._fit_python(X, y, amounts, X_val, y_val, amounts_val)
+    
+    def _fit_rust(self, X: np.ndarray, y: np.ndarray, 
+                  amounts: np.ndarray,
+                  X_val: Optional[np.ndarray] = None,
+                  y_val: Optional[np.ndarray] = None,
+                  amounts_val: Optional[np.ndarray] = None) -> 'FraudBoostClassifier':
+        """Fit using the Rust backend."""
+        if self.verbose >= 1:
+            print("Using Rust backend for training...")
+        
+        # Only support value_weighted loss in Rust for now
+        if not isinstance(self.loss_fn_, ValueWeightedLogLoss):
+            if self.verbose >= 1:
+                print("Warning: Rust backend only supports 'value_weighted' loss. Falling back to Python.")
+            return self._fit_python(X, y, amounts, X_val, y_val, amounts_val)
+        
+        # Create Rust booster
+        self._rust_booster = RustBooster(
+            n_estimators=self.n_estimators,
+            learning_rate=self.learning_rate,
+            max_depth=self.max_depth,
+            min_samples_leaf=self.min_samples_leaf,
+            min_samples_split=self.min_samples_split,
+            subsample=self.subsample,
+            colsample_bytree=self.colsample_bytree,
+            reg_lambda=self.reg_lambda,
+            fp_cost=self.fp_cost,
+            random_state=self.random_state,
+        )
+        
+        # Fit the Rust model
+        self._rust_booster.fit(X.astype(np.float64), y.astype(np.float64), amounts.astype(np.float64))
+        
+        # Extract fitted attributes
+        self.base_score_ = self._rust_booster.base_score
+        self.feature_importances_ = self._rust_booster.feature_importances
+        
+        # TODO: Add early stopping and validation loss tracking for Rust backend
+        self.train_losses_ = []  # Not implemented in Rust yet
+        self.val_losses_ = []    # Not implemented in Rust yet
+        
+        return self
+    
+    def _fit_python(self, X: np.ndarray, y: np.ndarray,
+                    amounts: np.ndarray,
+                    X_val: Optional[np.ndarray] = None,
+                    y_val: Optional[np.ndarray] = None,
+                    amounts_val: Optional[np.ndarray] = None) -> 'FraudBoostClassifier':
+        """Fit using the Python backend."""
+        if self.verbose >= 1:
+            print("Using Python backend for training...")
+        
+        n_samples, n_features = X.shape
         
         # Split training data for early stopping if no validation set provided
         if X_val is None and self.early_stopping_rounds is not None:
@@ -237,18 +316,23 @@ class FraudBoostClassifier:
         """Predict class probabilities."""
         X = self._validate_input_predict(X)
         
-        # Get predictions from all trees
-        predictions = np.full(len(X), self.base_score_)
-        
-        n_trees = len(self.estimators_)
-        if self.best_iteration_ is not None:
-            n_trees = min(n_trees, self.best_iteration_ + 1)
-        
-        for i in range(n_trees):
-            predictions += self.learning_rate * self._predict_tree(X, self.estimators_[i])
-        
-        # Convert logits to probabilities
-        probabilities = self._logits_to_proba(predictions)
+        if self._use_rust and hasattr(self, '_rust_booster'):
+            # Use Rust backend
+            probabilities = self._rust_booster.predict_proba(X.astype(np.float64))
+        else:
+            # Use Python backend
+            # Get predictions from all trees
+            predictions = np.full(len(X), self.base_score_)
+            
+            n_trees = len(self.estimators_)
+            if self.best_iteration_ is not None:
+                n_trees = min(n_trees, self.best_iteration_ + 1)
+            
+            for i in range(n_trees):
+                predictions += self.learning_rate * self._predict_tree(X, self.estimators_[i])
+            
+            # Convert logits to probabilities
+            probabilities = self._logits_to_proba(predictions)
         
         # Return both classes probabilities
         return np.column_stack([1 - probabilities, probabilities])
