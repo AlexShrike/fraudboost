@@ -3,6 +3,7 @@ README.md
 pyproject.toml
 setup.py
 fraudboost/__init__.py
+fraudboost/_rust_core.py
 fraudboost/core.py
 fraudboost/drift.py
 fraudboost/losses.py

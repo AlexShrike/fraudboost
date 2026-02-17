@@ -359,3 +359,71 @@ def cost_benefit_analysis(y_true: np.ndarray, y_pred: np.ndarray, amounts: np.nd
         'false_negatives': int(np.sum(fn_mask)),
         'true_negatives': int(np.sum(tn_mask))
     }
+
+
+# Additional helper functions for compatibility
+def calculate_precision_recall_f1(y_true: np.ndarray, y_pred: np.ndarray) -> tuple:
+    """
+    Calculate precision, recall, and F1 score.
+    
+    Args:
+        y_true: True binary labels
+        y_pred: Predicted binary labels
+        
+    Returns:
+        Tuple of (precision, recall, f1)
+    """
+    from sklearn.metrics import precision_score, recall_score, f1_score
+    
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    
+    return precision, recall, f1
+
+
+def calculate_value_detection_rate(y_true: np.ndarray, y_pred: np.ndarray, amounts: np.ndarray) -> float:
+    """Alias for value_detection_rate function."""
+    return value_detection_rate(y_true, y_pred, amounts)
+
+
+def calculate_net_savings(y_true: np.ndarray, y_pred: np.ndarray, amounts: np.ndarray, fp_cost: float = 100.0) -> float:
+    """Alias for net_savings function."""
+    return net_savings(y_true, y_pred, amounts, fp_cost)
+
+
+def find_optimal_threshold(y_true: np.ndarray, y_pred_proba: np.ndarray, metric: str = 'f1') -> float:
+    """
+    Find optimal classification threshold for a given metric.
+    
+    Args:
+        y_true: True binary labels
+        y_pred_proba: Predicted probabilities  
+        metric: Metric to optimize ('f1', 'precision', 'recall')
+        
+    Returns:
+        Optimal threshold between 0 and 1
+    """
+    from sklearn.metrics import precision_recall_curve, f1_score, precision_score, recall_score
+    
+    thresholds = np.linspace(0.01, 0.99, 100)
+    best_score = 0
+    best_threshold = 0.5
+    
+    for threshold in thresholds:
+        y_pred = (y_pred_proba >= threshold).astype(int)
+        
+        if metric == 'f1':
+            score = f1_score(y_true, y_pred, zero_division=0)
+        elif metric == 'precision':
+            score = precision_score(y_true, y_pred, zero_division=0)
+        elif metric == 'recall':
+            score = recall_score(y_true, y_pred, zero_division=0)
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+        
+        if score > best_score:
+            best_score = score
+            best_threshold = threshold
+            
+    return best_threshold
